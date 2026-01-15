@@ -18,7 +18,7 @@ from .providers.anthropic_client import AnthropicClient
 from .providers.openai_client import OpenAIClient
 
 # Supported LLM providers
-SUPPORTED_PROVIDERS = {"anthropic", "openai", "qwen"}
+SUPPORTED_PROVIDERS = {"anthropic", "openai", "qwen", "doubao"}
 
 
 def ClientFactory(
@@ -55,6 +55,7 @@ def ClientFactory(
         ),
         "qwen": lambda: OpenAIClient(task_id=task_id, task_log=task_log, cfg=config),
         "openai": lambda: OpenAIClient(task_id=task_id, task_log=task_log, cfg=config),
+        "doubao": lambda: OpenAIClient(task_id=task_id, task_log=task_log, cfg=config),
     }
 
     factory = client_creators.get(provider)
