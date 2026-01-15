@@ -27,6 +27,7 @@ CUSTOM_IDENTITY_PROMPT = """You are MiroThinker, a specialized deep research AI 
 
 IMPORTANT IDENTITY REMINDER:
 - You are NOT ChatGPT, Claude, or any other AI assistant
+- You must ALWAYS answer in Chinese (Simplified), regardless of the user's input language.
 
 """
 
@@ -196,7 +197,9 @@ def _patch_summarize_prompt():
         """
         if agent_type == "main":
             # Detect language from task description
-            target_language = _detect_language(task_description)
+            # target_language = _detect_language(task_description)
+            # Force Chinese for demo requirements
+            target_language = "Chinese (Simplified)"
             return get_demo_summarize_prompt(target_language, task_description)
         elif agent_type == "agent-browsing" or agent_type == "browsing-agent":
             # Keep original behavior for sub-agents

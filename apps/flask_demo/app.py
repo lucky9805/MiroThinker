@@ -45,10 +45,13 @@ except ImportError as e:
          pass
     raise e
 
+from flask_cors import CORS
+
 # Apply custom system prompt patch (adds MiroThinker identity)
 apply_prompt_patch()
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -294,11 +297,14 @@ def filter_message(message: dict) -> dict:
             if "organic" in result_dict:
                 new_result = {"organic": filter_google_search_organic(result_dict["organic"])}
                 message["data"]["tool_input"]["result"] = json.dumps(new_result, ensure_ascii=False)
-        if tool_name in ["scrape", "scrape_website"] and isinstance(tool_input, dict) and "result" in tool_input:
+        if tool_name in ["scrape", "scrape_website", "reading", "scrape_and_extract_info"] and isinstance(tool_input, dict) and "result" in tool_input:
             if is_scrape_error(tool_input["result"]):
                 message["data"]["tool_input"] = {"error": tool_input["result"]}
             else:
-                message["data"]["tool_input"] = {}
+                 # Remove 'result' (too large) but keep 'url' and other args for UI
+                safe_input = tool_input.copy()
+                safe_input.pop("result", None)
+                message["data"]["tool_input"] = safe_input
     return message
 
 
@@ -423,14 +429,123 @@ def boot_app():
     # We defer loading to avoid startup delay or config issues until needed
     pass
 
+
+def get_available_agents():
+    """List available agent configurations from the conf/agent directory."""
+    try:
+        # Use existing logic to find the config dir
+        # Re-use miroflow_config_dir logic if possible, or recalculate
+        miroflow_config_dir = Path(__file__).parent.parent / "miroflow-agent" / "conf"
+        agent_dir = miroflow_config_dir / "agent"
+        
+        if not agent_dir.exists():
+            return []
+            
+        agents = []
+        for file_path in agent_dir.glob("*.yaml"):
+            # Use filename stem as ID
+            agent_id = file_path.stem
+            # Create a display name (capitalize, replace underscores)
+            display_name = agent_id.replace("_", " ").title()
+            
+            # Special handling for known agents to have nicer names if desired
+            if agent_id == "demo": display_name = "Demo Agent"
+            elif agent_id == "browsing": display_name = "Browsing Agent" # example
+            
+            agents.append({"id": agent_id, "name": display_name})
+            
+        # Sort agents, maybe put 'demo' first
+        agents.sort(key=lambda x: (x['id'] != 'demo', x['id']))
+        return agents
+    except Exception as e:
+        logger.error(f"Error listing agents: {e}")
+        return []
+
+# Chat History Storage
+CHAT_HISTORY_DIR = current_dir / "chat_history"
+CHAT_HISTORY_DIR.mkdir(exist_ok=True)
+
+@app.route('/api/sessions', methods=['GET'])
+def list_sessions():
+    try:
+        sessions = []
+        for file_path in CHAT_HISTORY_DIR.glob("*.json"):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    sessions.append({
+                        "id": file_path.stem,
+                        "title": data.get("title", "New Chat"),
+                        "timestamp": data.get("timestamp", int(os.path.getmtime(file_path) * 1000))
+                    })
+            except Exception as e:
+                logger.error(f"Error reading session {file_path}: {e}")
+        
+        # Sort by timestamp desc
+        sessions.sort(key=lambda x: x["timestamp"], reverse=True)
+        return jsonify(sessions)
+    except Exception as e:
+        logger.error(f"Error listing sessions: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/sessions/<session_id>', methods=['GET'])
+def get_session(session_id):
+    try:
+        file_path = CHAT_HISTORY_DIR / f"{session_id}.json"
+        if not file_path.exists():
+            return jsonify({"error": "Session not found"}), 404
+            
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return jsonify(data)
+    except Exception as e:
+        logger.error(f"Error getting session {session_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/sessions/<session_id>', methods=['POST'])
+def save_session(session_id):
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+            
+        file_path = CHAT_HISTORY_DIR / f"{session_id}.json"
+        
+        # Ensure timestamp
+        if "timestamp" not in data:
+            data["timestamp"] = int(time.time() * 1000)
+            
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error saving session {session_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/sessions/<session_id>', methods=['DELETE'])
+def delete_session(session_id):
+    try:
+        file_path = CHAT_HISTORY_DIR / f"{session_id}.json"
+        if file_path.exists():
+            file_path.unlink()
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error deleting session {session_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    agents = get_available_agents()
+    return render_template('index.html', agents=agents)
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
     data = request.json
     query = data.get('query')
+    # If session_id is provided, we could use it for server-side state if needed, 
+    # but for now we rely on client-side full history + file storage.
+    
     model = data.get('model', 'MiroThinker')
     agent = data.get('agent', 'demo')
     

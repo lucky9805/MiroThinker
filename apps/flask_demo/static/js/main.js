@@ -14,6 +14,22 @@ document.addEventListener('DOMContentLoaded', () => {
     let conversationHistory = []; // Stores {role, content} objects
     let currentAIResponseText = ""; // Accumulates streaming text for history
 
+    // Polyfill or simple UUID generator for non-secure contexts
+    function generateUUID() {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+            return crypto.randomUUID();
+        }
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+            var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    }
+
+    let currentSessionId = generateUUID(); // Unique ID for current chat
+
+    // Load initial history list
+    loadSessionList();
+
     // Auto-resize textarea
     userInput.addEventListener('input', function () {
         this.style.height = 'auto';
@@ -49,12 +65,154 @@ document.addEventListener('DOMContentLoaded', () => {
         if (isGenerating && currentController) {
             currentController.abort();
         }
+        currentSessionId = generateUUID(); // New ID for new chat
+        conversationHistory = [];
+        agentState = { currentAgentId: null, agents: {} }; // Reset agent state too
+
         chatContainer.innerHTML = '';
         chatContainer.appendChild(welcomeMessage);
         welcomeMessage.style.display = 'flex';
         userInput.value = '';
         userInput.style.height = '48px';
+
+        // Refresh list to remove active highlight if any
+        loadSessionList();
     });
+
+    // Load Session List function
+    async function loadSessionList() {
+        try {
+            const res = await fetch('/api/sessions');
+            const sessions = await res.json();
+
+            const historyContainer = document.getElementById('history-list');
+            if (!historyContainer) return; // Must be added to HTML first
+
+            historyContainer.innerHTML = '';
+
+            sessions.forEach(session => {
+                const item = document.createElement('div');
+                item.className = `p-3 rounded-lg cursor-pointer hover:bg-gray-50 group flex items-center justify-between transition-colors ${session.id === currentSessionId ? 'bg-gray-50' : ''}`;
+                item.onclick = () => loadSession(session.id);
+
+                item.innerHTML = `
+                    <div class="flex-1 min-w-0 pr-2">
+                        <div class="text-sm font-medium text-gray-700 truncate" title="${escapeHtml(session.title)}">${escapeHtml(session.title)}</div>
+                        <div class="text-xs text-gray-400 mt-0.5">${new Date(session.timestamp).toLocaleDateString()}</div>
+                    </div>
+                `;
+                // Add delete button
+                const delBtn = document.createElement('button');
+                delBtn.className = 'opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 transition-opacity';
+                delBtn.innerHTML = `
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                `;
+                delBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    if (confirm('Delete this chat?')) deleteSession(session.id);
+                };
+                item.appendChild(delBtn);
+
+                historyContainer.appendChild(item);
+            });
+        } catch (e) {
+            console.error("Failed to load history:", e);
+        }
+    }
+
+    async function loadSession(id) {
+        if (isGenerating) return;
+        try {
+            const res = await fetch(`/api/sessions/${id}`);
+            if (!res.ok) return;
+            const data = await res.json();
+
+            currentSessionId = id;
+            conversationHistory = data.history || [];
+
+            // Clear UI and Re-render
+            chatContainer.innerHTML = '';
+            welcomeMessage.style.display = 'none';
+
+            // Re-play history
+            conversationHistory.forEach(msg => {
+                if (msg.role === 'user') appendUserMessage(msg.content);
+                else if (msg.role === 'assistant') {
+                    // For saved history, we just show the content as a static bubble
+                    // We don't have tool calls data preserved perfectly in this simple model 
+                    // unless we save the full agentState and tool outputs. 
+                    // For MVP simplicity, we render the raw markdown content.
+                    appendSimpleAIMessage(msg.content);
+                }
+            });
+
+            loadSessionList(); // Update active state
+            scrollToBottom();
+
+        } catch (e) {
+            console.error("Failed to load session:", e);
+        }
+    }
+
+    async function saveSession() {
+        if (!conversationHistory.length) return;
+
+        // Generate title if needed (first user message)
+        let title = "New Chat";
+        const firstUserMsg = conversationHistory.find(m => m.role === 'user');
+        if (firstUserMsg) {
+            title = firstUserMsg.content.slice(0, 30) + (firstUserMsg.content.length > 30 ? "..." : "");
+        }
+
+        const data = {
+            id: currentSessionId,
+            title: title,
+            timestamp: Date.now(),
+            history: conversationHistory
+        };
+
+        try {
+            await fetch(`/api/sessions/${currentSessionId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            loadSessionList(); // Refresh list to show new/updated chat
+        } catch (e) {
+            console.error("Failed to save session:", e);
+        }
+    }
+
+    async function deleteSession(id) {
+        try {
+            await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
+            if (currentSessionId === id) {
+                newChatBtn.click(); // Reset if deleted active
+            } else {
+                loadSessionList();
+            }
+        } catch (e) {
+            console.error("Failed to delete session:", e);
+        }
+    }
+
+    function appendSimpleAIMessage(markdownText) {
+        // Re-use createAgentMessageBubbles style but simpler
+        const id = 'hist-' + Math.random().toString(36).substr(2, 9);
+        createAgentMessageBubbles(id);
+        const contentDiv = document.getElementById(`${id}-content`);
+        const loadingDiv = document.getElementById(`${id}-loading`);
+        if (loadingDiv) loadingDiv.remove();
+
+        if (contentDiv) {
+            contentDiv.innerHTML = marked.parse(markdownText || "");
+            contentDiv.querySelectorAll('pre code').forEach((block) => {
+                hljs.highlightElement(block);
+            });
+        }
+    }
 
     async function submitForm() {
         const query = userInput.value.trim();
@@ -69,6 +227,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Add user message to history
         conversationHistory.push({ role: 'user', content: query });
+        saveSession(); // Save immediately with user msg
 
         startGeneration();
 
@@ -173,6 +332,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Save to history (if we have accumulated text)
         if (currentAIResponseText) {
             conversationHistory.push({ role: 'assistant', content: currentAIResponseText });
+            saveSession(); // Save with AI response
         }
     }
 
