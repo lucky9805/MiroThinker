@@ -140,11 +140,11 @@ document.addEventListener('DOMContentLoaded', () => {
             conversationHistory.forEach(msg => {
                 if (msg.role === 'user') appendUserMessage(msg.content);
                 else if (msg.role === 'assistant') {
-                    // For saved history, we just show the content as a static bubble
-                    // We don't have tool calls data preserved perfectly in this simple model 
-                    // unless we save the full agentState and tool outputs. 
-                    // For MVP simplicity, we render the raw markdown content.
-                    appendSimpleAIMessage(msg.content);
+                    if (msg.thinking_data) {
+                        restoreFullAIMessage(msg);
+                    } else {
+                        appendSimpleAIMessage(msg.content);
+                    }
                 }
             });
 
@@ -327,11 +327,33 @@ document.addEventListener('DOMContentLoaded', () => {
             if (loadingDiv) {
                 loadingDiv.remove();
             }
+
+            // Auto-collapse thinking process on finish
+            const thinkBody = document.getElementById(`${id}-thinking-body`);
+            const thinkHeaderIcon = document.querySelector(`#${id}-thinking-container .transform`);
+            if (thinkBody) {
+                thinkBody.style.display = 'none'; // Collapse
+                if (thinkHeaderIcon) {
+                    thinkHeaderIcon.classList.remove('rotate-180');
+                }
+
+                // Optional: Update header text to show Done?
+                // const thinkTitle = document.querySelector(`#${id}-thinking-container span.font-medium`);
+                // if (thinkTitle) thinkTitle.textContent = "Thinking Process (Completed)";
+            }
         }
 
         // Save to history (if we have accumulated text)
         if (currentAIResponseText) {
-            conversationHistory.push({ role: 'assistant', content: currentAIResponseText });
+            // Include thinking data
+            const historyEntry = {
+                role: 'assistant',
+                content: currentAIResponseText,
+                thinking_data: {
+                    log: agentState ? agentState.log : []
+                }
+            };
+            conversationHistory.push(historyEntry);
             saveSession(); // Save with AI response
         }
     }
@@ -396,8 +418,75 @@ document.addEventListener('DOMContentLoaded', () => {
         // Reset state for new response
         agentState = {
             currentAgentId: null,
-            agents: {}
+            agents: {},
+            thoughts: [], // Track thinking steps for history
+            tools: []     // Track tools linearly for history
         };
+    }
+
+    function restoreFullAIMessage(msg) {
+        const id = 'hist-' + Math.random().toString(36).substr(2, 9);
+        createAgentMessageBubbles(id);
+        const loadingDiv = document.getElementById(`${id}-loading`);
+        if (loadingDiv) loadingDiv.remove();
+
+        // 1. Restore Thinking Process
+        if (msg.thinking_data) {
+            // We need to replay events roughly. 
+            // Or just render the list of items (thoughts and tools) in order if we saved them linearly.
+            // If we saved them separately, we just render all thoughts then all tools? No, order matters.
+
+            // If we have a linear log:
+            if (msg.thinking_data.log) {
+                msg.thinking_data.log.forEach(item => {
+                    if (item.type === 'thought') {
+                        updateThinkingProcess(id, item.content, true);
+                    } else if (item.type === 'tool') {
+                        // Create a fake tool entry to render
+                        // We need to inject it into thinking body
+                        if (!document.getElementById(`${id}-thinking-container`)) {
+                            updateThinkingProcess(id, "", true);
+                        }
+                        const thinkingBody = document.getElementById(`${id}-thinking-body`);
+                        const toolDiv = document.createElement('div');
+                        toolDiv.className = 'mb-2';
+                        toolDiv.innerHTML = renderToolCard(item.name, item.input, item.output);
+                        thinkingBody.appendChild(toolDiv);
+                    }
+                });
+            } else {
+                // Fallback for older saves? or if we stick to split arrays
+                if (msg.thinking_data.thoughts) {
+                    msg.thinking_data.thoughts.forEach(t => updateThinkingProcess(id, t, true));
+                }
+                // Tools might be lost or separate.
+            }
+
+            // Auto collapse
+            const thinkBody = document.getElementById(`${id}-thinking-body`);
+            const thinkIcon = document.getElementById(`${id}-thinking-icon`);
+            if (thinkBody) {
+                thinkBody.style.display = 'none';
+                if (thinkIcon) thinkIcon.classList.remove('rotate-180');
+            }
+        }
+
+        // 2. Restore Final Content
+        const contentDiv = document.getElementById(`${id}-content`);
+        // We need to make sure we append AFTER thinking container
+        // current text block logic handles this?
+        // simple innerHTML might kill thinking container if we are not careful.
+        // appendSimpleAIMessage used innerHTML = marked.parse...
+        // We should append a text block.
+
+        let textBlock = document.createElement('div');
+        textBlock.className = 'markdown-content';
+        textBlock.innerHTML = marked.parse(msg.content || "");
+        contentDiv.appendChild(textBlock);
+
+        contentDiv.querySelectorAll('pre code').forEach((block) => {
+            hljs.highlightElement(block);
+        });
     }
 
     function handleStreamEvent(message, responseId) {
@@ -423,19 +512,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // Handle explicit thinking events
             const thoughtContent = data.thought || data.content;
             if (thoughtContent) {
-                const thinkingDiv = document.getElementById(`${responseId}-thinking`);
-                if (thinkingDiv) {
-                    if (thinkingDiv.classList.contains('hidden')) {
-                        thinkingDiv.classList.remove('hidden');
-                        thinkingDiv.className = 'bg-gray-50 border border-gray-100 rounded-lg p-3 mb-4 text-xs text-gray-500 font-mono whitespace-pre-wrap';
-                        thinkingDiv.innerHTML = '<div class="font-bold mb-1 text-gray-400">🤔 Thinking Process:</div>';
-                    }
-                    // Append thought content
-                    const thoughtSpan = document.createElement('span');
-                    thoughtSpan.textContent = thoughtContent + "\n";
-                    thinkingDiv.appendChild(thoughtSpan);
-                    scrollToBottom();
-                }
+                updateThinkingProcess(responseId, thoughtContent, true);
             }
         }
         else if (event === 'tool_call') {
@@ -443,7 +520,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!agentId) return;
 
             const toolCallId = data.tool_call_id;
-            const toolName = data.tool_name;
+            let toolName = data.tool_name;
             const agent = agentState.agents[agentId];
 
             if (!agent.tools[toolCallId]) {
@@ -457,6 +534,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const toolEntry = agent.tools[toolCallId];
+            if (!toolName && toolEntry) toolName = toolEntry.name;
 
             // Handle show_text (streaming text response)
             if (toolName === 'show_text' || toolName === 'message') {
@@ -467,33 +545,33 @@ document.addEventListener('DOMContentLoaded', () => {
                     delta = data.tool_input.text;
                 }
 
-                // Format think tags
                 if (delta) {
-                    // Check for <think> tags
-                    // We will simple append raw text for now and let markdown parser handle it?
-                    // Or we can parse it out.
-                    // Let's just append to content and re-render markdown of that specific block?
-                    // Better: accumulate valid markdown text.
-
                     toolEntry.content += delta;
                     currentAIResponseText += delta; // Accumulate for history
-
-                    // Update main content area
-                    // We treat the whole chat response as one markdown block for simplicity of "show_text"
-                    // Tools are inserted as separate blocks.
-
-                    // Actually, let's keep it simple: 
-                    // If it's show_text, we append to a "text-accumulator".
-                    // If it's a tool, we append a "tool-card".
-                    // But order matters.
-
-                    // Simplification: We will just append HTML to the contentDiv immediately
-                    // instead of complex state tracking recalculation.
                 }
             } else {
                 // Other tools
                 // We update input/output in the state
-                if (data.tool_input) toolEntry.input = data.tool_input;
+
+                if (!toolEntry.input) toolEntry.input = {};
+
+                if (data.tool_input) {
+                    // 1. Preserve critical fields from current state
+                    const preserved = {
+                        code: toolEntry.input.code,
+                        code_block: toolEntry.input.code_block,
+                        command: toolEntry.input.command
+                    };
+
+                    // 2. Merge new data (potentially overwriting with empty junk)
+                    Object.assign(toolEntry.input, data.tool_input);
+
+                    // 3. Restore critical fields IF they became empty/missing AND were valid before
+                    if (preserved.code && !toolEntry.input.code) toolEntry.input.code = preserved.code;
+                    if (preserved.code_block && !toolEntry.input.code_block) toolEntry.input.code_block = preserved.code_block;
+                    if (preserved.command && !toolEntry.input.command) toolEntry.input.command = preserved.command;
+                }
+
                 if (data.tool_output) toolEntry.output = data.tool_output;
             }
 
@@ -501,18 +579,108 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function updateThinkingProcess(responseId, content, append = true) {
+        // ... (DOM creation logic) ...
+        // Ensure agentState.log exists if we use it
+        if (agentState && !agentState.log) agentState.log = [];
+
+        // Log the thought
+        // Check if last log item is a thought, append to it to avoid fragmentation?
+        if (agentState.log) {
+            const lastLog = agentState.log[agentState.log.length - 1];
+            if (lastLog && lastLog.type === 'thought' && append) {
+                lastLog.content += content;
+            } else {
+                agentState.log.push({ type: 'thought', content: content });
+            }
+        }
+
+        // ... (Rest of existing DOM logic) ...
+        const contentDiv = document.getElementById(`${responseId}-content`);
+        if (!contentDiv) return;
+
+        let thinkingContainer = document.getElementById(`${responseId}-thinking-container`);
+        if (!thinkingContainer) {
+            thinkingContainer = document.createElement('div');
+            thinkingContainer.id = `${responseId}-thinking-container`;
+            thinkingContainer.className = 'mb-4 border border-gray-200 rounded-lg overflow-hidden';
+
+            // Header
+            const header = document.createElement('div');
+            header.className = 'bg-gray-50 px-3 py-2 text-xs font-medium text-gray-500 cursor-pointer flex items-center justify-between hover:bg-gray-100 transition-colors select-none';
+            header.innerHTML = `
+                <div class="flex items-center gap-2">
+                    <span>🤔 Thinking Process</span>
+                    <span id="${responseId}-thinking-status" class="animate-pulse text-blue-500 hidden">●</span>
+                </div>
+                <svg id="${responseId}-thinking-icon" class="w-4 h-4 transform rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+            `;
+            header.onclick = () => {
+                const body = document.getElementById(`${responseId}-thinking-body`);
+                const icon = document.getElementById(`${responseId}-thinking-icon`);
+                if (body.style.display === 'none') {
+                    body.style.display = 'block';
+                    icon.classList.add('rotate-180');
+                } else {
+                    body.style.display = 'none';
+                    icon.classList.remove('rotate-180');
+                }
+            };
+            thinkingContainer.appendChild(header);
+
+            // Body
+            const body = document.createElement('div');
+            body.id = `${responseId}-thinking-body`;
+            body.className = 'bg-gray-50/50 p-3 text-xs text-gray-600 font-mono whitespace-pre-wrap border-t border-gray-200';
+            body.style.display = 'block'; // Default open
+            thinkingContainer.appendChild(body);
+
+            // Insert at top of content div
+            if (contentDiv.firstChild) {
+                contentDiv.insertBefore(thinkingContainer, contentDiv.firstChild);
+            } else {
+                contentDiv.appendChild(thinkingContainer);
+            }
+        }
+
+        const body = document.getElementById(`${responseId}-thinking-body`);
+        const statusDot = document.getElementById(`${responseId}-thinking-status`);
+
+        // Show status dot if active
+        if (statusDot) statusDot.classList.remove('hidden');
+
+        // Append logic: Find the LAST element. If it's a text container, append. Else create new.
+        const lastEl = body.lastElementChild;
+        let textContainer;
+
+        if (lastEl && lastEl.classList.contains('thinking-text')) {
+            textContainer = lastEl;
+        } else {
+            textContainer = document.createElement('div');
+            textContainer.className = 'thinking-text mb-2'; // Add spacing between blocks
+            body.appendChild(textContainer);
+        }
+
+        if (append) {
+            textContainer.textContent += content;
+        } else {
+            textContainer.textContent = content;
+        }
+
+        scrollToBottom();
+    }
+
     function renderUpdate(responseId, toolName, toolEntry, data) {
         const contentDiv = document.getElementById(`${responseId}-content`);
         const loadingDiv = document.getElementById(`${responseId}-loading`);
 
-        // Remove loading div temporarily to append at end, then add back
-        if (loadingDiv.parentNode === contentDiv) {
+        // Remove loading div temporarily
+        if (loadingDiv && loadingDiv.parentNode === contentDiv) {
             contentDiv.removeChild(loadingDiv);
         }
 
         if (toolName === 'show_text' || toolName === 'message') {
             // Find or create the current text block
-            // We need a stable ID for the current streaming text block
             let textBlock = document.getElementById(`${responseId}-text-current`);
             if (!textBlock) {
                 textBlock = document.createElement('div');
@@ -521,50 +689,112 @@ document.addEventListener('DOMContentLoaded', () => {
                 contentDiv.appendChild(textBlock);
             }
 
-            // Re-render the markdown for this block
-            // Handle <think> tags specially
+            // Extract <think> content
             let rawContent = toolEntry.content;
+            const thinkPattern = /<think>([\s\S]*?)<\/think>/g;
+            let displayContent = rawContent;
+            let foundThinking = false;
+            let accumulatedThought = "";
 
-            // Basic think tag handling
-            rawContent = rawContent.replace(/<think>/g, '\n> **Thinking:**\n> ');
-            rawContent = rawContent.replace(/<\/think>/g, '\n\n');
+            displayContent = displayContent.replace(thinkPattern, (match, content) => {
+                accumulatedThought += content;
+                foundThinking = true;
+                return "";
+            });
 
-            textBlock.innerHTML = marked.parse(rawContent);
+            // Handle partial <think>
+            const partialThink = displayContent.match(/<think>([\s\S]*)$/);
+            if (partialThink) {
+                accumulatedThought += partialThink[1];
+                foundThinking = true;
+                displayContent = displayContent.substring(0, partialThink.index);
+            }
 
-            // Highlight code blocks
+            if (foundThinking) {
+                // Use updateThinkingProcess to correctly append interleaved thoughts
+                // We use append=false if we want to replace, but here we are re-parsing the whole chunk?
+                // Actually, since this runs every chunk on full content, we might duplicate text if we just append?
+
+                // CRITICAL CORRECTION: If we are extracting from full content stream, we shouldn't use "append += content" naively.
+                // We need to manage the text block.
+                // But updateThinkingProcess is designed for 'agent_thought' events which are incremental segments.
+                // Here we have the FULL thought string extracted from full text.
+
+                // Let's create a specialized updater for extracted thought that Replaces the content of the "Current" thought block.
+                updateExtractThinking(responseId, accumulatedThought);
+            }
+
+            textBlock.innerHTML = marked.parse(displayContent);
+
+            // Highlight
             textBlock.querySelectorAll('pre code').forEach((block) => {
                 hljs.highlightElement(block);
             });
 
         } else {
-            // It's a tool (google_search, scrape, etc)
-            // If it's the first time we see this tool call, create a container
-            // We use toolEntry in state to only create once.
+            // TOOL CARDS -> MOVE TO THINKING BODY
 
-            // We need to identify if we should update an existing card or create new
-            // Since we don't have unique stable IDs for DOM elements mapped to tool_id easily without clutter,
-            // we'll try to find it.
+            // Ensure thinking container exists
+            // calling updateThinkingProcess with empty content ensures creation
+            if (!document.getElementById(`${responseId}-thinking-container`)) {
+                updateThinkingProcess(responseId, "", true);
+            }
 
+            const thinkingBody = document.getElementById(`${responseId}-thinking-body`);
+
+            // Identify tool div
             const toolDomId = `${responseId}-tool-${data.tool_call_id}`;
             let toolDiv = document.getElementById(toolDomId);
 
             if (!toolDiv) {
                 toolDiv = document.createElement('div');
                 toolDiv.id = toolDomId;
-                contentDiv.appendChild(toolDiv);
+                toolDiv.className = 'mb-2';
+                thinkingBody.appendChild(toolDiv); // Append to THINKING BODY
 
-                // If we switched from text to tool, the next text should be a new block
-                const currentText = document.getElementById(`${responseId}-text-current`);
-                if (currentText) currentText.removeAttribute('id'); // Retire current text block
+                // Log the tool call in sequence
+                if (agentState && !agentState.log) agentState.log = [];
+                // Check if already in log (by reference or ID?)
+                // Since this runs only when creating DIV, it runs once per tool usually.
+                // We add a reference to the toolEntry so updates reflect in the log automatically.
+                if (agentState.log) {
+                    toolEntry.type = 'tool'; // Mark as tool
+                    agentState.log.push(toolEntry);
+                }
             }
 
-            // Render the tool card based on current input/output state
             toolDiv.innerHTML = renderToolCard(toolName, toolEntry.input, toolEntry.output);
         }
 
         // Add loading back at bottom
-        contentDiv.appendChild(loadingDiv);
+        if (loadingDiv) contentDiv.appendChild(loadingDiv);
         scrollToBottom();
+    }
+
+    function updateExtractThinking(responseId, content) {
+        // Helper to update specific extracted thought part only
+        const contentDiv = document.getElementById(`${responseId}-content`);
+        if (!contentDiv) return;
+
+        // Ensure container exists (reuse logic or call updateThinkingProcess with empty)
+        if (!document.getElementById(`${responseId}-thinking-container`)) {
+            updateThinkingProcess(responseId, "", true);
+        }
+
+        const body = document.getElementById(`${responseId}-thinking-body`);
+
+        // Find the "extracted" container or create one at the end if it doesn't exist?
+        // To avoid duplication during streaming re-render, we need a stable ID for THIS thought block.
+        // We can attach it to the text-current?
+        // Simplified: Just use one 'extracted-thought' block at the end.
+
+        let extractedContainer = body.querySelector('.extracted-thinking-current');
+        if (!extractedContainer) {
+            extractedContainer = document.createElement('div');
+            extractedContainer.className = 'thinking-text extracted-thinking-current mb-2';
+            body.appendChild(extractedContainer);
+        }
+        extractedContainer.textContent = content;
     }
 
     function renderToolCard(name, input, output) {
@@ -620,56 +850,62 @@ document.addEventListener('DOMContentLoaded', () => {
             return html;
         }
 
-        // Sogou Search Special
-        if (name === 'sogou_search') {
-            const query = input ? (input.q || input.query || '') : '';
+
+        if (name.toLowerCase().includes('search')) {
+            const query = input ? (input.q || input.query || input.queries || '') : '';
             let results = [];
 
+            // Try to parse output
             if (output) {
-                // Handle various potential output formats (parsed object or JSON string)
-                let parsedOutput = output;
-                if (typeof output === 'string') {
-                    try { parsedOutput = JSON.parse(output); } catch (e) { }
-                }
+                let raw = output;
+                if (output.result) raw = output.result;
+                else if (output.organic) raw = output.organic; // Direct list
 
-                if (parsedOutput.Pages) {
-                    results = parsedOutput.Pages;
-                } else if (parsedOutput.result) {
-                    // Sometimes wrapped in result
+                if (typeof raw === 'string') {
                     try {
-                        const nested = JSON.parse(parsedOutput.result);
-                        if (nested.Pages) results = nested.Pages;
-                    } catch (e) { }
+                        const parsed = JSON.parse(raw);
+                        if (Array.isArray(parsed)) results = parsed;
+                        else if (parsed.organic) results = parsed.organic;
+                        else if (parsed.results) results = parsed.results;
+                    } catch (e) {
+                        // If not JSON, maybe just text?
+                        if (raw.length > 0) results = [{ title: "Result", snippet: raw }];
+                    }
+                } else if (Array.isArray(raw)) {
+                    results = raw;
                 }
             }
 
-            if (!query && results.length === 0) return '';
-
-            let html = `<div class="search-card">`;
-            if (query) {
-                html += `
-                    <div class="search-header">
-                        <span class="mr-2">🔍</span> Sogou Search: "${escapeHtml(query)}"
-                    </div>
-                `;
-            }
+            let html = `< div class="tool-card search-card" > `;
+            html += `
+                        < div class="tool-header" >
+                            <span class="mr-2">🔍</span> ${name}: "${escapeHtml(String(query))}"
+                                < span class="float-right text-gray-400 text-xs" > ${hasOutput ? (results.length + ' results') : 'Searching...'}</span >
+                        </div >
+                        `;
 
             if (results.length > 0) {
-                html += `<div class="search-count">≡ Found ${results.length} results</div>`;
-                html += `<div class="search-results">`;
+                html += `< div class="mt-2 text-xs space-y-2 max-h-60 overflow-y-auto" > `;
                 results.forEach(item => {
+                    // Handle various formats
+                    const title = item.title || item.name || "Untitled";
+                    const link = item.link || item.url || "#";
+                    const snippet = item.snippet || item.body || item.description || "";
+
                     html += `
-                        <a href="${item.url}" target="_blank" class="search-result-item">
-                            <span class="mr-2">🌐</span>
-                            <span class="truncate">${escapeHtml(item.title)}</span>
-                        </a>
-                     `;
+                        < div class="border-l-2 border-blue-200 pl-2" >
+                            <a href="${escapeHtml(link)}" target="_blank" class="font-semibold text-blue-600 hover:underline block truncate">${escapeHtml(title)}</a>
+                            <div class="text-gray-600 mt-1 line-clamp-2">${escapeHtml(snippet)}</div>
+                        </div >
+                        `;
                 });
-                html += `</div>`;
-            } else if (hasInput && !hasOutput) {
-                html += `<div class="p-2 text-xs text-gray-400 italic">Searching...</div>`;
+                html += `</div > `;
+            } else if (hasOutput) {
+                // Raw output fallback
+                html += `< div class="mt-2 text-xs text-gray-500 italic" > No structure parsed, see raw output below.</div > `;
             }
-            html += `</div>`;
+
+            html += `</div > `;
             return html;
         }
 
@@ -692,7 +928,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const displayUrl = url ? url : 'Web Content';
 
             return `
-                <div class="scrape-card ${isError ? 'scrape-error' : ''}">
+                        < div class="scrape-card ${isError ? 'scrape-error' : ''}" >
                     <div class="flex items-center overflow-hidden">
                         <span class="scrape-icon mr-2">🌐</span>
                         <a href="${escapeHtml(url)}" target="_blank" class="scrape-url truncate max-w-[300px] hover:underline cursor-pointer text-blue-600 block">
@@ -702,25 +938,87 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div class="scrape-status ${isError ? 'error' : (isDone ? 'success' : 'text-gray-400')}">
                         ${isError ? '❌ Failed' : (isDone ? '✓ Scraped' : 'Reading...')}
                     </div>
-                </div>
-            `;
+                </div >
+                        `;
+        }
+
+        // Python Tool Special
+        if (name === 'tool-python' || name === 'run_python_code' || name === 'python_interpreter' || name === 'create_sandbox' || name === 'run_command') {
+
+            // Handle create_sandbox specially
+            if (name === 'create_sandbox') {
+                return `
+                        < div class="tool-card" >
+                        <div class="tool-header">
+                            <span>📦 Create Sandbox</span>
+                        </div>
+                        <div class="tool-status text-xs text-gray-500 mt-1">
+                            ${hasOutput ? (output.result || 'Sandbox Ready') : 'Initializing environment...'}
+                        </div>
+                    </div >
+                        `;
+            }
+
+            let code = '';
+            if (input && input.code) {
+                code = input.code;
+            } else if (input && input.code_block) {
+                code = input.code_block;
+            } else if (input && input.command) {
+                code = input.command; // For run_command
+            } else if (typeof input === 'string') {
+                code = input;
+            }
+
+            const isError = output && output.error;
+            const isDone = hasOutput;
+
+            let outputDisplay = '';
+            if (output && output.result) {
+                outputDisplay = output.result;
+            } else if (output && output.stdout) {
+                outputDisplay = output.stdout;
+            } else if (output && typeof output === 'string') {
+                outputDisplay = output;
+            }
+
+            const lang = name === 'run_command' ? 'bash' : 'python';
+            const title = name === 'run_command' ? '💻 Shell Command' : '🐍 Python Code';
+
+            return `
+                        < div class="tool-card python-card" >
+                    <div class="tool-header flex justify-between items-center mb-2">
+                        <span class="font-bold text-gray-700">${title}</span>
+                        <span class="text-xs ${isError ? 'text-red-500' : 'text-gray-400'}">${isError ? 'Error' : (isDone ? 'Executed' : 'Running...')}</span>
+                    </div>
+                    <div class="bg-gray-800 rounded-md p-3 overflow-x-auto mb-2">
+                        <pre><code class="language-${lang} text-xs text-gray-100">${escapeHtml(code)}</code></pre>
+                    </div>
+                    ${outputDisplay ? `
+                    <div class="mt-2 border-t border-gray-200 pt-2">
+                        <div class="text-xs font-semibold text-gray-500 mb-1">Output:</div>
+                        <pre class="bg-gray-50 p-2 rounded text-xs text-gray-700 whitespace-pre-wrap font-mono max-h-60 overflow-y-auto">${escapeHtml(outputDisplay)}</pre>
+                    </div>
+                    ` : ''
+                }
+                </div >
+                        `;
         }
 
         // Generic Tool
-        let inputStr = '';
-        if (hasInput) {
-            inputStr = Object.entries(input).map(([k, v]) => `${k}: ${String(v).slice(0, 30)}`).join(', ');
-        }
-
         return `
-            <div class="tool-card">
-                <div class="tool-header">
-                    <span>🔧 ${name}</span>
-                </div>
-                ${inputStr ? `<div class="tool-brief">${escapeHtml(inputStr)}</div>` : ''}
-                ${hasOutput ? '<div class="tool-status">✓ Done</div>' : ''}
-            </div>
-        `;
+                        < div class="tool-card custom-tool-card" >
+                 <div class="tool-header mb-2 font-bold text-gray-700">🔧 ${escapeHtml(name)}</div>
+                 <div class="text-xs bg-gray-50 p-2 rounded border border-gray-100 font-mono">
+                    <div class="text-gray-500 mb-1">Input:</div>
+                    <div class="mb-2 whitespace-pre-wrap">${escapeHtml(JSON.stringify(input, null, 2))}</div>
+                    ${hasOutput ? `
+                    <div class="text-gray-500 mb-1 border-t border-gray-100 pt-2">Output:</div>
+                    <div class="whitespace-pre-wrap">${escapeHtml(typeof output === 'string' ? output : JSON.stringify(output, null, 2))}</div>
+                    ` : ''}
+                 </div>
+            </div >
+                        `;
     }
 
     function escapeHtml(text) {

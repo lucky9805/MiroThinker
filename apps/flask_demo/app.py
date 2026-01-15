@@ -154,8 +154,8 @@ def load_miroflow_config(config_overrides: Optional[dict] = None, llm_config_nam
     llm_provider = os.getenv("DEFAULT_LLM_PROVIDER", "qwen")
     model_name = os.getenv("DEFAULT_MODEL_NAME", "MiroThinker")
     agent_set = os.getenv("DEFAULT_AGENT_SET", "demo")
-    base_url = os.getenv("BASE_URL", "http://localhost:11434")
-    api_key = os.getenv("API_KEY", "")
+    base_url = os.getenv("BASE_URL")
+    api_key = os.getenv("API_KEY")
 
     provider_config_map = {
         "anthropic": "claude-3-7",
@@ -171,30 +171,17 @@ def load_miroflow_config(config_overrides: Optional[dict] = None, llm_config_nam
         
     overrides.extend([
         f"llm={llm_config}",
-        # Only override provider if not switching config file entirely, 
-        # OR if we want to force provider. 
-        # If we switch config file, it should have the provider.
-        # But we keep defaults just in case, though they might conflict if config file has them.
-        # Hydra overrides take precedence over config file values if passed here.
-        # We should NOT override specific fields if config file is authoritative,
-        # unless they are env vars we want to enforce.
-        
-        # Actually, let's only set defaults if NO override name provided, 
-        # or be careful not to override config file values with "defaults" from env if we switched model.
     ])
-    
-    # Only add these default overrides if we are using the default provider/model
-    # or if we explicitly want to partial override.
-    # If llm_config_name is set, we assume valid config file and trust it, 
-    # except maybe for overrides passed in config_overrides.
     
     if not llm_config_name:
         overrides.extend([
             f"llm.provider={llm_provider}",
             f"llm.model_name={model_name}",
-            f"llm.base_url={base_url}",
-            f"llm.api_key={api_key}",
         ])
+        if base_url:
+            overrides.append(f"llm.base_url={base_url}")
+        if api_key:
+            overrides.append(f"llm.api_key={api_key}")
     
     overrides.extend([
         f"agent={agent_set}",
@@ -774,116 +761,188 @@ def openai_stream_generator(query: str, model: str):
     executor.shutdown(wait=False)
 
 @app.route('/v1/chat/completions', methods=['POST'])
-def api_chat_completions():
-    try:
-        data = request.json
-        if not data or "messages" not in data:
-            return jsonify({"error": "Missing 'messages' in request body"}), 400
-            
-        messages = data.get("messages")
-        model = data.get("model", "MiroThinker")
-        stream = data.get("stream", False)
+def openai_chat_completions():
+    """
+    OpenAI-compatible endpoint for Chat Completions.
+    Supports 'model' (Agent Name/LLM Model), 'messages', and 'stream'.
+    Maps Agent Thoughts/Tools to 'reasoning_content' (DeepSeek R1 style).
+    """
+    data = request.json or {}
+    messages = data.get('messages', [])
+    requested_model = data.get('model', 'news_monitor')
+    stream = data.get('stream', False)
+
+    # 1. Parse Last User Message
+    user_query = "Hello"
+    if messages:
+        # Simple extraction of last user message
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                user_query = msg.get("content", "")
+                break
+
+    # 2. Parse Agent and Model
+    # Format: "agent_name" OR "agent_name/llm_model"
+    parse_result = requested_model.split('/', 1)
+    target_agent = parse_result[0]
+    target_llm = parse_result[1] if len(parse_result) > 1 else None
+    
+    # Logic to switch LLM config if requested
+    if target_llm:
+        llm_config_name = "llm/openai" # default
+        provider = "openai"
         
-        query = extract_query_from_messages(messages)
-        if not query:
-             return jsonify({"error": "No user message found in 'messages'"}), 400
-
-        # Model switching logic (duplicated from chat)
-        current_model = None
-        current_agent = None
-        if _preload_cache["cfg"]:
-            current_model = _preload_cache["cfg"].llm.model_name
-            # Agent name location depends on config structure, safeguarding
-            current_agent = _preload_cache["cfg"].agent.get("name", "researcher")
-
-        # Validate agent
-        VALID_AGENTS = [
-            "default", "demo", 
-            "mirothinker_v1.0", "mirothinker_v1.0_keep5", 
-            "mirothinker_v1.5", "mirothinker_v1.5_keep5_max200", "mirothinker_v1.5_keep5_max400",
-            "multi_agent", "multi_agent_os", 
-            "single_agent", "single_agent_keep5"
-        ]
-        
-        target_agent = data.get("agent", "single_agent")
-        if target_agent not in VALID_AGENTS:
-            logger.warning(f"Invalid agent '{target_agent}' requested. Falling back to 'single_agent'. Available: {VALID_AGENTS}")
-            target_agent = "single_agent"
+        if "doubao" in target_llm:
+            llm_config_name = "llm/doubao"
+            provider = "doubao"
+        elif "qwen" in target_llm:
+            llm_config_name = "llm/qwen"
+            provider = "dashscope"
+        elif "claude" in target_llm:
+            llm_config_name = "llm/anthropic"
+            provider = "anthropic"
+        elif "gemini" in target_llm:
+            llm_config_name = "llm/gemini"
+            provider = "google"
             
-        if current_model != model or current_agent != target_agent:
-            logger.info(f"API Switching config: Model {current_model}->{model}, Agent {current_agent}->{target_agent}")
-            provider = "qwen"
-            llm_config_name = None
-            if "gpt-4o-mini" in model:
-                provider = "openai"
-                llm_config_name = "gpt-4o-mini"
-            elif "gpt" in model or "o1" in model:
-                provider = "openai"
-                llm_config_name = "gpt-5" 
-            elif "claude" in model:
-                provider = "anthropic"
-                llm_config_name = "claude-3-7"
-            elif "doubao" in model:
-                provider = "doubao"
-                llm_config_name = "doubao"
-            elif "qwen" in model:
-                 provider = "qwen"
-                 llm_config_name = "qwen-3"
-
-            config_overrides = {
-                "llm": {"model_name": model, "provider": provider},
-                "agent": target_agent
+        config_overrides = {
+            "llm": {
+                "model_name": target_llm,
+                "provider": provider
             }
-            
-            # Special handling for Doubao:
-            # The user sends "doubao" but the real model ID is in the yaml (e.g. doubao-seed-...)
-            # We should NOT override model_name with "doubao" alias.
-            if "doubao" in model:
-                 del config_overrides["llm"]["model_name"]
+        }
+        
+        # Doubao specific: Don't override model_name with generic alias if config handles it
+        if "doubao" in target_llm:
+             del config_overrides["llm"]["model_name"]
 
-            _preload_cache["loaded"] = False
-            _ensure_preloaded(config_overrides, llm_config_name)
-        else:
-            _ensure_preloaded()
+        _preload_cache["loaded"] = False
+        _ensure_preloaded(config_overrides, llm_config_name)
+    else:
+        # Just ensure default loaded
+        _ensure_preloaded()
 
-        if stream:
-            return Response(stream_with_context(openai_stream_generator(query, model)), 
-                            mimetype='text/event-stream')
-        else:
-            # Sync mode: collect all chunks and return one JSON
-            full_content = []
-            gen = openai_stream_generator(query, model)
-            for chunk_str in gen:
-                if chunk_str.startswith("data: ") and not chunk_str.strip() == "data: [DONE]":
-                    try:
-                        chunk_json = json.loads(chunk_str[6:].strip())
-                        content = chunk_json["choices"][0]["delta"].get("content", "")
-                        if content:
-                            full_content.append(content)
-                    except:
-                        pass
-            
-            response_text = "".join(full_content)
-            return jsonify({
-                "id": f"chatcmpl-{uuid.uuid4()}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model,
+    # 3. Check Agent Existence
+    logging.info(f"OpenAI API Request: Agent={target_agent}, Model={target_llm or 'default'}, Query={user_query[:50]}...")
+    
+    try:
+        agent = get_agent_by_name(target_agent)
+    except Exception as e:
+        return jsonify({"error": {"message": f"Agent '{target_agent}' not found. Usage: 'agent_name' or 'agent_name/model_name'", "type": "invalid_request_error"}}), 404
+
+    # 4. Stream Generator
+    def generate_openai_stream():
+        chat_id = "chatcmpl-" + str(uuid.uuid4())
+        created_time = int(time.time())
+
+        # Helper to yield chunk
+        def yield_chunk(delta_dict, finish_reason=None):
+            chunk = {
+                "id": chat_id,
+                "object": "chat.completion.chunk",
+                "created": created_time,
+                "model": requested_model,
                 "choices": [{
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": response_text
-                    },
-                    "finish_reason": "stop"
-                }],
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-            })
+                    "delta": delta_dict,
+                    "finish_reason": finish_reason
+                }]
+            }
+            return f"data: {json.dumps(chunk)}\n\n"
 
-    except Exception as e:
-        logger.error(f"API Error: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        # Yield Initial Role
+        yield yield_chunk({"role": "assistant"})
+
+        # Run Agent
+        try:
+            event_queue = queue.Queue()
+            
+            def run_sync():
+                try:
+                    setup_miroflow_env()
+                    asyncio.run(agent.run(
+                        task=user_query,
+                        output_queue=event_queue
+                    ))
+                    event_queue.put(None) # Sentinel
+                except Exception as e:
+                    logging.error(f"Agent Run Error: {e}")
+                    event_queue.put({"event": "error", "error": str(e)})
+
+            t = threading.Thread(target=run_sync)
+            t.start()
+
+            # Consumer Loop
+            while True:
+                try:
+                    event_data = event_queue.get(timeout=1.0)
+                except queue.Empty:
+                    if not t.is_alive():
+                        break
+                    continue
+
+                if event_data is None: 
+                    break # Done
+                
+                if isinstance(event_data, dict) and event_data.get("event") == "error":
+                     yield yield_chunk({"content": f"\n\n[Error: {event_data.get('error')}]"}, "stop")
+                     break
+
+                # Parse Event (Standard MiroFlow Event Object)
+                event_type = getattr(event_data, 'event_type', None)
+                
+                if not event_type: 
+                    continue
+
+                if event_type == 'agent_thought':
+                    thought = getattr(event_data, 'thought', "") or getattr(event_data, 'content', "")
+                    if thought:
+                        yield yield_chunk({"reasoning_content": thought})
+
+                elif event_type == 'tool_call':
+                    tool_name = getattr(event_data, 'tool_name', 'tool')
+                    tool_input = getattr(event_data, 'tool_input', {})
+                    log = f"\n\n**Tool Call** (`{tool_name}`):\n```json\n{json.dumps(tool_input, ensure_ascii=False)}\n```\n\n"
+                    yield yield_chunk({"reasoning_content": log})
+
+                elif event_type == 'tool_result':
+                    result = getattr(event_data, 'tool_result', '')
+                    # Limit log size
+                    res_str = str(result)
+                    if len(res_str) > 1000: res_str = res_str[:1000] + "...(truncated)"
+                    log = f"**Result**:\n```text\n{res_str}\n```\n"
+                    yield yield_chunk({"reasoning_content": log})
+
+                elif event_type == 'response_chunk':
+                    content = getattr(event_data, 'content', "")
+                    if content:
+                        yield yield_chunk({"content": content})
+
+            # Done
+            yield yield_chunk({}, "stop")
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            logging.error(f"Streaming Error: {e}")
+            yield yield_chunk({"content": f"\n\n[System Error: {str(e)}]"}, "stop")
+
+    if stream:
+        return Response(stream_with_context(generate_openai_stream()), mimetype='text/event-stream')
+    else:
+        # Sync Fallback (Not implemented fully, returning error to force stream)
+        return jsonify({
+            "error": {
+                "message": "Please use 'stream': true. Non-streaming is not supported in this demo.",
+                "type": "invalid_request_error"
+            }
+        }), 400
+
+
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5002))
-    app.run(host='0.0.0.0', port=port, debug=True, threaded=True)
+    # Ensure event loop policy for MacOS/Unix
+    if sys.platform.lower().startswith("win"):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
+    # Load default configs? No, lazy load on request
+    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
