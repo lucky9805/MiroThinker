@@ -261,10 +261,15 @@ def _ensure_preloaded(config_overrides=None, llm_config_name=None):
 # Helper functions from main.py
 def filter_google_search_organic(organic: List[dict]) -> List[dict]:
     result = []
+    print(f"organic------------------------------------------{organic}")
+
     for item in organic:
         result.append({
             "title": item.get("title", ""),
             "link": item.get("link", ""),
+            "snippet": item.get("snippet", ""),
+            "date": item.get("date", ""),
+            "source": item.get("source", "")
         })
     return result
 
@@ -279,6 +284,7 @@ def filter_message(message: dict) -> dict:
     if message["event"] == "tool_call":
         tool_name = message["data"].get("tool_name")
         tool_input = message["data"].get("tool_input")
+        print(f"DEBUG_FILTER_MESSAGE: Processing tool_call for {tool_name}")
         if tool_name == "google_search" and isinstance(tool_input, dict) and "result" in tool_input:
             result_dict = json.loads(tool_input["result"])
             if "organic" in result_dict:
@@ -398,6 +404,9 @@ def events_generator(query: str, history=None):
             if message is None:
                 break
             
+            # Apply message filtering/transformation (e.g. search result processing)
+            message = filter_message(message)
+
             # Format as SSE
             yield f"data: {json.dumps(message)}\n\n"
         except queue.Empty:

@@ -805,61 +805,24 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (!hasInput && !hasOutput) return '';
 
-        // Google Search Special
-        if (name === 'google_search') {
-            const query = input ? (input.q || input.query || '') : '';
-            let results = [];
 
-            if (output) {
-                if (output.organic) results = output.organic;
-                else if (output.result) {
-                    try {
-                        const parsed = JSON.parse(output.result);
-                        if (parsed.organic) results = parsed.organic;
-                    } catch (e) { }
-                }
-            }
-
-            if (!query && results.length === 0) return '';
-
-            let html = `<div class="search-card">`;
-            if (query) {
-                html += `
-                    <div class="search-header">
-                        <span class="mr-2">🔍</span> Google Search: "${escapeHtml(query)}"
-                    </div>
-                `;
-            }
-
-            if (results.length > 0) {
-                html += `<div class="search-count">≡ Found ${results.length} results</div>`;
-                html += `<div class="search-results">`;
-                results.slice(0, 50).forEach(item => {
-                    html += `
-                        <a href="${item.link}" target="_blank" class="search-result-item">
-                            <span class="mr-2">🌐</span>
-                            <span class="truncate">${escapeHtml(item.title)}</span>
-                        </a>
-                     `;
-                });
-                html += `</div>`;
-            } else if (hasInput && !hasOutput) {
-                html += `<div class="p-2 text-xs text-gray-400 italic">Searching...</div>`;
-            }
-            html += `</div>`;
-            return html;
-        }
 
 
         if (name.toLowerCase().includes('search')) {
+            // Fallback: If output is missing but input has result (legacy/history mode), use it
+            if ((!output || output === "") && input && input.result) {
+                output = input.result;
+            }
+
+            const effectivelyHasOutput = output !== null && output !== undefined && output !== '';
             const query = input ? (input.q || input.query || input.queries || '') : '';
             let results = [];
 
-            // Try to parse output
             if (output) {
                 let raw = output;
+                // If output itself wraps result
                 if (output.result) raw = output.result;
-                else if (output.organic) raw = output.organic; // Direct list
+                else if (output.organic) raw = output.organic;
 
                 if (typeof raw === 'string') {
                     try {
@@ -867,45 +830,59 @@ document.addEventListener('DOMContentLoaded', () => {
                         if (Array.isArray(parsed)) results = parsed;
                         else if (parsed.organic) results = parsed.organic;
                         else if (parsed.results) results = parsed.results;
+                        else if (parsed.Pages) results = parsed.Pages; // Sogou
                     } catch (e) {
-                        // If not JSON, maybe just text?
-                        if (raw.length > 0) results = [{ title: "Result", snippet: raw }];
+                        // If not JSON, treat as single text result if not empty
+                        if (raw.trim().length > 0) results = [{ title: "Result", snippet: raw, link: "" }];
                     }
                 } else if (Array.isArray(raw)) {
                     results = raw;
+                } else if (typeof raw === 'object') {
+                    // Handle object that contains results list
+                    if (raw.organic && Array.isArray(raw.organic)) results = raw.organic;
+                    else if (raw.results && Array.isArray(raw.results)) results = raw.results;
+                    else if (raw.Pages && Array.isArray(raw.Pages)) results = raw.Pages; // Sogou
                 }
             }
 
-            let html = `< div class="tool-card search-card" > `;
+            let html = `<div class="bg-white rounded-md border border-gray-200 overflow-hidden my-2 tool-card search-card">`;
+
+            // Header
             html += `
-                        < div class="tool-header" >
-                            <span class="mr-2">🔍</span> ${name}: "${escapeHtml(String(query))}"
-                                < span class="float-right text-gray-400 text-xs" > ${hasOutput ? (results.length + ' results') : 'Searching...'}</span >
-                        </div >
-                        `;
+                <div class="bg-gray-50 px-3 py-2 border-b border-gray-100 flex items-center justify-between">
+                    <div class="flex items-center truncate">
+                        <span class="mr-2 text-base">🔍</span> 
+                        <span class="font-medium text-gray-700 text-sm truncate max-w-[200px]" title="${escapeHtml(query)}">${escapeHtml(query)}</span>
+                    </div>
+                    <div class="text-xs text-gray-400 whitespace-nowrap ml-2">
+                        ${effectivelyHasOutput ? results.length + ' results' : 'Searching...'}
+                    </div>
+                </div>
+            `;
 
             if (results.length > 0) {
-                html += `< div class="mt-2 text-xs space-y-2 max-h-60 overflow-y-auto" > `;
+                html += `<div class="divide-y divide-gray-100 max-h-60 overflow-y-auto">`;
                 results.forEach(item => {
-                    // Handle various formats
                     const title = item.title || item.name || "Untitled";
                     const link = item.link || item.url || "#";
-                    const snippet = item.snippet || item.body || item.description || "";
 
                     html += `
-                        < div class="border-l-2 border-blue-200 pl-2" >
-                            <a href="${escapeHtml(link)}" target="_blank" class="font-semibold text-blue-600 hover:underline block truncate">${escapeHtml(title)}</a>
-                            <div class="text-gray-600 mt-1 line-clamp-2">${escapeHtml(snippet)}</div>
-                        </div >
-                        `;
+                        <div class="px-3 py-1.5 hover:bg-blue-50 transition-colors duration-150 group">
+                            <a href="${escapeHtml(link)}" target="_blank" class="flex items-center text-sm text-blue-600 hover:text-blue-800 hover:underline truncate">
+                                <span class="mr-2 text-xs opacity-70">🌐</span>
+                                <span class="truncate" title="${title}">${escapeHtml(title)}</span>
+                            </a>
+                        </div>
+                     `;
                 });
-                html += `</div > `;
-            } else if (hasOutput) {
-                // Raw output fallback
-                html += `< div class="mt-2 text-xs text-gray-500 italic" > No structure parsed, see raw output below.</div > `;
+                html += `</div>`;
+            } else if (effectivelyHasOutput) {
+                html += `<div class="p-3 text-xs text-gray-500 italic">No structure parsed, see raw output below.</div>`;
+            } else {
+                html += `<div class="p-3 text-xs text-gray-400 italic">Searching...</div>`;
             }
 
-            html += `</div > `;
+            html += `</div>`;
             return html;
         }
 
@@ -928,7 +905,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const displayUrl = url ? url : 'Web Content';
 
             return `
-                        < div class="scrape-card ${isError ? 'scrape-error' : ''}" >
+                        <div class="scrape-card ${isError ? 'scrape-error' : ''}">
                     <div class="flex items-center overflow-hidden">
                         <span class="scrape-icon mr-2">🌐</span>
                         <a href="${escapeHtml(url)}" target="_blank" class="scrape-url truncate max-w-[300px] hover:underline cursor-pointer text-blue-600 block">
@@ -938,7 +915,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     <div class="scrape-status ${isError ? 'error' : (isDone ? 'success' : 'text-gray-400')}">
                         ${isError ? '❌ Failed' : (isDone ? '✓ Scraped' : 'Reading...')}
                     </div>
-                </div >
+                </div>
                         `;
         }
 
