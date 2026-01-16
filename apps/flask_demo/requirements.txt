@@ -1,5 +1,6 @@
 # ../../../libs/miroflow-tools
 flask>=3.0.0
+flask-cors
 hydra-core>=1.3.0
 python-dotenv>=1.0.0
 omegaconf>=2.3.0

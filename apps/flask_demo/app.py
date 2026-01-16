@@ -17,12 +17,15 @@ current_dir = Path(__file__).parent.resolve()
 apps_dir = current_dir.parent.resolve()
 gradio_demo_dir = apps_dir / "gradio-demo"
 miroflow_agent_dir = apps_dir / "miroflow-agent"
+miroflow_tools_dir = apps_dir.parent / "libs" / "miroflow-tools" / "src"
 
 sys.path.append(str(current_dir))
 if gradio_demo_dir.exists():
     sys.path.append(str(gradio_demo_dir))
 if miroflow_agent_dir.exists():
     sys.path.append(str(miroflow_agent_dir))
+if miroflow_tools_dir.exists():
+    sys.path.append(str(miroflow_tools_dir))
 
 from dotenv import load_dotenv
 from hydra import compose, initialize_config_dir
