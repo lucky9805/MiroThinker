@@ -530,10 +530,49 @@ def delete_session(session_id):
         logger.error(f"Error deleting session {session_id}: {e}")
         return jsonify({"error": str(e)}), 500
 
+def get_available_models():
+    """Scan conf/llm directory for available model configurations."""
+    models = []
+    llm_conf_dir = Path(__file__).parent.parent / "miroflow-agent" / "conf" / "llm"
+    
+    # Defaults if directory lookup fails
+    defaults = [
+        {"id": "MiroThinker", "name": "MiroThinker (Default)"},
+        {"id": "gpt-4o", "name": "GPT-4o"},
+        {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
+        {"id": "claude-3-5-sonnet-20241022", "name": "Claude 3.5 Sonnet"},
+        {"id": "doubao-seed-1-6-251015", "name": "Doubao Pro (1.6)"},
+        {"id": "qwen-2.5-72b-instruct", "name": "Qwen 2.5 72B"},
+    ]
+    
+    try:
+        if llm_conf_dir.exists():
+            for file_path in llm_conf_dir.glob("*.yaml"):
+                if file_path.stem == "default":
+                    continue
+                # Use filename as ID
+                models.append({
+                    "id": file_path.stem, 
+                    "name": file_path.stem.replace("-", " ").title()
+                })
+            
+            # Sort models
+            models.sort(key=lambda x: x['name'])
+            
+            # Add defaults if not present (or we can just rely on files)
+            # For now, let's prepend the 'Default' (which maps to default.yaml logic)
+            models.insert(0, {"id": "default", "name": "Default (Configured)"})
+            return models
+        return defaults
+    except Exception as e:
+        logger.error(f"Error listing models: {e}")
+        return defaults
+
 @app.route('/')
 def index():
     agents = get_available_agents()
-    return render_template('index.html', agents=agents)
+    models = get_available_models()
+    return render_template('index.html', agents=agents, models=models)
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -566,11 +605,22 @@ def chat():
         # Note: This is not thread safe for multiple users!
         logger.info(f"Switching model from {current_model} to {model}")
         
-        # Infer provider and config file based on model name
-        provider = "qwen"
-        llm_config_name = None
+        # Try to match model ID to a config file
+        llm_conf_dir = Path(__file__).parent.parent / "miroflow-agent" / "conf" / "llm"
+        potential_config = llm_conf_dir / f"{model}.yaml"
         
-        if "gpt-4o-mini" in model:
+        provider = "openai" # Default safe fallback
+        llm_config_name = None
+
+        if potential_config.exists():
+             llm_config_name = model
+             # We assume the YAML file contains the provider info, but we need to pass a valid provider 
+             # to the hydration logic if it's strict. 
+             # However, typically 'llm_config_name' dictates which file is loaded.
+             # We set provider to generic 'qwen' or 'openai' just to satisfy the dict, 
+             # but the loaded config should override it.
+             logger.info(f"Found specific config file for model: {model}")
+        elif "gpt-4o-mini" in model:
             provider = "openai"
             llm_config_name = "gpt-4o-mini"
         elif "gpt" in model or "o1" in model:
@@ -585,12 +635,15 @@ def chat():
         elif "qwen" in model:
              provider = "qwen"
              llm_config_name = "qwen-3" # Fallback if specific one not found
+        else:
+             # Default fallback if no file and no match
+             llm_config_name = "default"
 
         # We pass llm_config_name to effectively switch the base config file.
         # We still pass config_overrides just in case, but rely on config file for base_url
         config_overrides = {
             "llm": {
-                "model_name": model,
+                "model_name": model, # This might override what's in the file, be careful.
                 "provider": provider
             },
             "agent": agent
@@ -598,6 +651,19 @@ def chat():
         
         # Special handling for Doubao:
         # The user sends "doubao" but the real model ID is in the yaml (e.g. doubao-seed-...)
+        if "doubao" in model and not potential_config.exists():
+             # ... existing doubao logic ...
+             pass
+             
+        # If we found a specific config file, we should arguably NOT override model_name 
+        # because the file might have the specific technical model name (like .gguf)
+        if potential_config.exists():
+            # Don't override model_name if we are loading a full config file for it
+            if "model_name" in config_overrides["llm"]:
+                del config_overrides["llm"]["model_name"]
+            # Don't override provider if we don't know it, let config decide
+            if "provider" in config_overrides["llm"]:
+                 del config_overrides["llm"]["provider"]
         # We should NOT override model_name with "doubao" alias.
         if "doubao" in model:
                 del config_overrides["llm"]["model_name"]

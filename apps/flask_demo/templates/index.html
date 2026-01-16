@@ -64,12 +64,9 @@
                 <div class="relative">
                     <select id="model-select"
                         class="w-full appearance-none bg-gray-50 border border-gray-200 text-gray-700 py-3 px-4 pr-8 rounded-xl leading-tight focus:outline-none focus:bg-white focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition-all">
-                        <option value="MiroThinker">MiroThinker (Default)</option>
-                        <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-                        <option value="gpt-4o-mini">GPT-4o Mini</option>
-                        <option value="doubao-seed-1-6-251015">Doubao Pro (1.6)</option>
-                        <option value="gpt-4o">GPT-4o</option>
-                        <option value="qwen-2.5-72b-instruct">Qwen 2.5 72B</option>
+                        {% for model in models %}
+                        <option value="{{ model.id }}">{{ model.name }}</option>
+                        {% endfor %}
                     </select>
                     <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-gray-500">
                         <svg class="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
